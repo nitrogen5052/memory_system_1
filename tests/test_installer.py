@@ -278,6 +278,49 @@ def test_rollback_refuses_schema_two_metadata_without_transaction_journal(prepar
         rollback_installation(prepared_plan.workspace, applied.backup_dir)
 
 
+@pytest.mark.parametrize("version", (None, 1, 3))
+def test_rollback_accepts_absent_and_explicit_supported_metadata_schemas(
+    prepared_plan: Plan, version: int | None
+) -> None:
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    metadata = prepared_plan.workspace / ".memory-system/installation.json"
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    if version is None:
+        del payload["metadata_schema_version"]
+    else:
+        payload["metadata_schema_version"] = version
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert (prepared_plan.workspace / "AGENTS.md").read_bytes() == b"before authority\n"
+
+
+@pytest.mark.parametrize("version", (4, "3", True, None))
+def test_rollback_rejects_unknown_or_malformed_metadata_schema_without_mutation(
+    prepared_plan: Plan, version: object
+) -> None:
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    metadata = prepared_plan.workspace / ".memory-system/installation.json"
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload["metadata_schema_version"] = version
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+    before = {
+        path: (prepared_plan.workspace / path).read_bytes()
+        for path in ("AGENTS.md", "managed.md", "_memory/Context/projects/workspace.md", ".memory-system/installation.json")
+    }
+
+    with pytest.raises(ApplyError, match="metadata schema version"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert {
+        path: (prepared_plan.workspace / path).read_bytes()
+        for path in before
+    } == before
+
+
 def test_apply_recovers_when_atomic_write_raises_after_replace(
     prepared_plan: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:

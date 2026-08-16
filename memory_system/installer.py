@@ -385,17 +385,25 @@ def _preflight_rollback(
     changed: list[PurePosixPath] = []
     adopted: list[PurePosixPath] = []
     rollback_records: dict[object, object]
+    if "metadata_schema_version" not in payload:
+        schema_version = 1
+    else:
+        schema_version = payload["metadata_schema_version"]
+        if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+            raise ApplyError("invalid installation metadata schema version")
     raw_retired = payload.get("rollback_artifacts", [])
     if not isinstance(raw_retired, list):
         raise ApplyError("invalid rollback artifact metadata")
-    if payload.get("metadata_schema_version") == 3:
+    if schema_version == 3:
         rollback_records = {}
-    elif payload.get("metadata_schema_version") == 2:
+    elif schema_version == 2:
         raise ApplyError("schema-2 installation metadata lacks a safe transaction rollback journal")
-    else:
+    elif schema_version == 1:
         # Schema-1 metadata predates the carried-forward inventory and retains
         # its established single-install rollback behavior.
         rollback_records = dict(artifacts)
+    else:
+        raise ApplyError(f"unsupported installation metadata schema version: {schema_version}")
     for entry in raw_retired:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(entry.get("record"), dict):
             raise ApplyError("invalid rollback artifact metadata")
