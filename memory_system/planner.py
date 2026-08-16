@@ -160,8 +160,8 @@ def _plan_state(
         changes.append(_change(path, ChangeKind.CREATE, None, content, "curated state is absent"))
     elif not _owned(record, "curated"):
         conflicts.append(_conflict(path, before, "unrecorded pre-existing state file"))
-    elif not _matches_applied(record, before):
-        conflicts.append(_conflict(path, before, "curated state does not match recorded content"))
+    # Curated state prose belongs to the project.  Its structural schema is
+    # verified separately, so a content edit must not produce a managed drift.
 
 
 def _plan_authority(
