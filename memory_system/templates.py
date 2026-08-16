@@ -11,7 +11,7 @@ from .config import ProjectSpec, WorkspaceConfig
 
 
 _MARKER = re.compile(r"<!-- memory-system:([A-Za-z0-9._:-]+):(start|end) -->")
-_MARKER_LIKE = re.compile(r"<!--\s*memory-system(?::|\s|-->|$).*?(?:-->|$)", re.DOTALL)
+_MARKER_LIKE = re.compile(r"<!--\s*memory-system.*?(?:-->|$)", re.DOTALL)
 _UNMANAGED_HEADING = re.compile(r"^#{1,6}\s+.*memory", re.IGNORECASE | re.MULTILINE)
 _UNMANAGED_NORM = re.compile(
     r"^[*-]?\s*.*(?:claude-mem|memory system)", re.IGNORECASE | re.MULTILINE

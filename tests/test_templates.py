@@ -158,6 +158,9 @@ def test_managed_update_rejects_unmatched_or_duplicate_markers(existing: str) ->
         "<!-- memory-system:root:finish -->\n",
         "<!-- memory-system:root :start -->\n",
         "<!--memory-system:root:start -->\n",
+        "<!-- memory-system/root:start -->\n",
+        "<!-- memory-system.foo:root:start -->\n",
+        "<!-- memory-system?root:start -->\n",
     ],
 )
 def test_managed_update_rejects_malformed_marker_like_comments(existing: str) -> None:
