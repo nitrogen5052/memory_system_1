@@ -152,6 +152,22 @@ def test_managed_update_rejects_unmatched_or_duplicate_markers(existing: str) ->
 @pytest.mark.parametrize(
     "existing",
     [
+        "<!-- memory-system:root:start-->\n",
+        "<!-- memory-system:root:end-->\n",
+        "<!-- memory-system::start -->\n",
+        "<!-- memory-system:root:finish -->\n",
+        "<!-- memory-system:root :start -->\n",
+        "<!--memory-system:root:start -->\n",
+    ],
+)
+def test_managed_update_rejects_malformed_marker_like_comments(existing: str) -> None:
+    with pytest.raises(ManagedBlockConflict, match="marker"):
+        upsert_managed_block(existing, "root", "new\n")
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
         "# Memory policy\n",
         "Use claude-mem for every decision.\n",
         "- Follow the memory system before editing.\n",

@@ -11,6 +11,7 @@ from .config import ProjectSpec, WorkspaceConfig
 
 
 _MARKER = re.compile(r"<!-- memory-system:([A-Za-z0-9._:-]+):(start|end) -->")
+_MARKER_LIKE = re.compile(r"<!--\s*memory-system(?::|\s|-->|$).*?(?:-->|$)", re.DOTALL)
 _UNMANAGED_HEADING = re.compile(r"^#{1,6}\s+.*memory", re.IGNORECASE | re.MULTILINE)
 _UNMANAGED_NORM = re.compile(
     r"^[*-]?\s*.*(?:claude-mem|memory system)", re.IGNORECASE | re.MULTILINE
@@ -119,8 +120,16 @@ def _path(path: PurePosixPath | str) -> str:
 
 
 def _validated_marker_pairs(existing: str) -> dict[str, tuple[re.Match[str], re.Match[str]]]:
+    marker_comments = tuple(_MARKER_LIKE.finditer(existing))
+    parsed_markers = tuple(_MARKER.finditer(existing))
+    if len(marker_comments) != len(parsed_markers) or any(
+        comment.group() != marker.group()
+        for comment, marker in zip(marker_comments, parsed_markers, strict=True)
+    ):
+        raise ManagedBlockConflict("invalid managed-block marker")
+
     markers: dict[str, dict[str, list[re.Match[str]]]] = {}
-    for marker in _MARKER.finditer(existing):
+    for marker in parsed_markers:
         markers.setdefault(marker.group(1), {"start": [], "end": []})[marker.group(2)].append(marker)
 
     pairs = {}
