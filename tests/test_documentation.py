@@ -14,6 +14,7 @@ from memory_system.config import load_workspace_config
 REPOSITORY = Path(__file__).resolve().parents[1]
 EXAMPLE = REPOSITORY / "examples/multi-project-workspace"
 README = REPOSITORY / "README.md"
+DOCKERFILE = REPOSITORY / "Dockerfile"
 TEMPLATES = {
     "active-state-index.md",
     "project-memory-protocol.md",
@@ -136,3 +137,10 @@ def test_source_templates_are_available_to_the_renderer() -> None:
     templates = importlib.resources.files("memory_system").joinpath("templates")
 
     assert {item.name for item in templates.iterdir()} == TEMPLATES
+
+
+def test_docker_clean_room_reapply_requires_exact_no_change_output() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert 'reapply_output="$(memory-system apply --yes --workspace /tmp/memory-system-workspace)"' in dockerfile
+    assert 'test "$reapply_output" = "No changes"' in dockerfile
