@@ -234,6 +234,47 @@ default_worker_port = 37700
         load_workspace_config(tmp_path)
 
 
+@pytest.mark.parametrize("child_state", [False, True])
+def test_rejects_root_and_child_state_symlink_escapes(
+    tmp_path: Path, child_state: bool
+) -> None:
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "AGENTS.md").touch()
+    (tmp_path / "alpha" / "AGENTS.md").touch()
+    state_dir = tmp_path / "_memory" / "Context" / "projects"
+    state_dir.mkdir(parents=True)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.touch()
+    escaped_state = state_dir / ("alpha.md" if child_state else "root.md")
+    escaped_state.symlink_to(outside)
+    root_state = "_memory/Context/projects/root.md"
+    child_state_path = "_memory/Context/projects/alpha.md"
+    (tmp_path / "memory-system.toml").write_text(f"""
+schema_version = 1
+methodology_version = "1.0"
+[workspace]
+root_identity = "root"
+state = "{root_state}"
+authority = ["AGENTS.md"]
+[[projects]]
+identity = "alpha"
+path = "alpha"
+state = "{child_state_path}"
+authority = ["alpha/AGENTS.md"]
+""")
+    (tmp_path / "compatibility.toml").write_text("""
+schema_version = 1
+methodology_version = "1.0"
+[claude_mem]
+minimum_version = "13.15.0"
+tested_versions = ["13.15.0"]
+default_worker_port = 37700
+""")
+
+    with pytest.raises(ConfigError, match="state.*escapes"):
+        load_workspace_config(tmp_path)
+
+
 @pytest.mark.parametrize(("field", "value"), [("schema_version", "2"), ("methodology_version", '\"2.0\"')])
 def test_rejects_unsupported_versions(tmp_path: Path, field: str, value: str) -> None:
     version_line = f"{field} = {value}"

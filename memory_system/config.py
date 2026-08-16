@@ -95,7 +95,7 @@ def load_workspace_config(
         raise ConfigError("unsupported schema version")
     if methodology_version != compatibility.methodology_version:
         raise ConfigError("unsupported methodology version")
-    _validate_existing_paths(workspace_root, projects, root_authority)
+    _validate_existing_paths(workspace_root, root_state, projects, root_authority)
 
     return WorkspaceConfig(
         schema_version=schema_version,
@@ -225,6 +225,7 @@ def _validate_authority_scopes(
 
 def _validate_existing_paths(
     workspace: Path,
+    root_state: PurePosixPath,
     projects: tuple[ProjectSpec, ...],
     root_authority: tuple[PurePosixPath, ...],
 ) -> None:
@@ -233,14 +234,18 @@ def _validate_existing_paths(
         resolved_roots.append(_resolve_contained(workspace, project.path, "project root"))
     if len(set(resolved_roots)) != len(resolved_roots):
         raise ConfigError("symlink alias for project root")
+    for state in (root_state, *(project.state for project in projects)):
+        _resolve_contained(workspace, state, "state", require_exists=False)
     for authority in (*root_authority, *(item for project in projects for item in project.authority)):
         _resolve_contained(workspace, authority, "authority")
 
 
-def _resolve_contained(workspace: Path, path: PurePosixPath, kind: str) -> Path:
+def _resolve_contained(
+    workspace: Path, path: PurePosixPath, kind: str, *, require_exists: bool = True
+) -> Path:
     expected = workspace.joinpath(*path.parts)
     try:
-        resolved = expected.resolve(strict=True)
+        resolved = expected.resolve(strict=require_exists)
     except FileNotFoundError as exc:
         raise ConfigError(f"{kind} does not exist: {path}") from exc
     try:
