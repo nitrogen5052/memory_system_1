@@ -32,6 +32,18 @@ class InstallResult:
     restored_after_failure: bool
 
 
+@dataclass(frozen=True)
+class _FileState:
+    content: bytes | None
+    mode: int | None
+
+
+@dataclass(frozen=True)
+class _RollbackOperation:
+    path: PurePosixPath
+    replacement: _FileState
+
+
 def apply_plan(plan: Plan, confirmed: bool) -> InstallResult:
     """Apply a conflict-free plan, restoring the workspace if a write fails."""
     if not confirmed:
@@ -50,6 +62,7 @@ def apply_plan(plan: Plan, confirmed: bool) -> InstallResult:
     for change in changes:
         _check_before_hash(workspace, change)
 
+    prior_metadata_existed = metadata.exists()
     backup_dir = _create_backup_dir(workspace)
     originals: dict[PurePosixPath, bytes | None] = {}
     modes: dict[PurePosixPath, int | None] = {}
@@ -65,20 +78,21 @@ def apply_plan(plan: Plan, confirmed: bool) -> InstallResult:
         for change in rewritten:
             assert change.content is not None
             target = _contained_path(workspace, change.path, "planned target")
-            _atomic_write(target, change.content.encode("utf-8"), modes[change.path])
             touched.append(change.path)
+            _atomic_write(target, change.content.encode("utf-8"), modes[change.path])
             _check_after_hash(target, change)
             changed_paths.append(change.path)
 
-        payload = _installation_payload(workspace, changes, backup_dir)
+        payload = _installation_payload(workspace, changes, backup_dir, prior_metadata_existed)
         metadata_bytes = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        _atomic_write(metadata, metadata_bytes, modes[_METADATA_PATH])
         touched.append(_METADATA_PATH)
+        _atomic_write(metadata, metadata_bytes, modes[_METADATA_PATH])
         if _sha256_bytes(metadata.read_bytes()) != _sha256_bytes(metadata_bytes):
             raise ApplyError("installation metadata hash mismatch after write")
     except (OSError, UnicodeError, ApplyError) as exc:
-        _restore(workspace, backup_dir, touched, originals, modes)
-        raise ApplyError(str(exc)) from exc
+        restore_error = _restore(workspace, touched, originals, modes)
+        detail = str(exc) if restore_error is None else f"{exc}; recovery failed: {restore_error}"
+        raise ApplyError(detail) from exc
 
     return InstallResult(backup_dir, tuple(changed_paths), adopted_paths, False)
 
@@ -100,34 +114,18 @@ def rollback_installation(workspace: Path, backup_dir: PurePosixPath) -> Install
         raise ApplyError("invalid installation metadata")
     if payload.get("backup_dir") != backup_dir.as_posix():
         raise ApplyError("backup directory does not match installation metadata")
-    _validate_rollback_backups(workspace, backup, artifacts)
-
-    changed: list[PurePosixPath] = []
-    adopted: list[PurePosixPath] = []
-    for raw_path, record in sorted(artifacts.items()):
-        path = _safe_relative(raw_path, "artifact")
-        if not isinstance(record, dict):
-            raise ApplyError("invalid installation artifact")
-        _validate_no_symlink_alias(workspace, path, "artifact")
-        if record.get("change_kind") == ChangeKind.ADOPT_EXISTING.value:
-            adopted.append(path)
-            continue
-        target = _contained_path(workspace, path, "artifact")
-        archived = backup / "files" / Path(*path.parts)
-        if archived.exists():
-            _validate_archive_path(backup, archived)
-            _atomic_write(target, archived.read_bytes(), stat.S_IMODE(archived.stat().st_mode))
-        else:
-            _remove_created_target(target)
-        changed.append(path)
-
-    archived_metadata = backup / "files" / Path(*_METADATA_PATH.parts)
-    if archived_metadata.exists():
-        _validate_archive_path(backup, archived_metadata)
-        _atomic_write(metadata, archived_metadata.read_bytes(), stat.S_IMODE(archived_metadata.stat().st_mode))
-    else:
-        _remove_created_target(metadata)
-    return InstallResult(backup_dir, tuple(changed), tuple(adopted), False)
+    operations, changed, adopted = _preflight_rollback(workspace, backup, payload, artifacts)
+    states = {operation.path: _capture_state(workspace, operation.path) for operation in operations}
+    touched: list[PurePosixPath] = []
+    try:
+        for operation in operations:
+            touched.append(operation.path)
+            _restore_state(_contained_path(workspace, operation.path, "rollback target"), operation.replacement)
+    except OSError as exc:
+        restore_error = _restore_states(workspace, touched, states)
+        detail = str(exc) if restore_error is None else f"{exc}; rollback recovery failed: {restore_error}"
+        raise ApplyError(detail) from exc
+    return InstallResult(backup_dir, changed, adopted, False)
 
 
 def _workspace(workspace: Path) -> Path:
@@ -204,22 +202,24 @@ def _backup_target(
 
 def _restore(
     workspace: Path,
-    backup_dir: PurePosixPath,
     touched: list[PurePosixPath],
     originals: dict[PurePosixPath, bytes | None],
     modes: dict[PurePosixPath, int | None],
-) -> None:
+) -> OSError | None:
+    failure: OSError | None = None
     for path in reversed(touched):
-        target = _contained_path(workspace, path, "restore target")
-        original = originals[path]
-        if original is None:
-            _remove_created_target(target)
-        else:
-            _atomic_write(target, original, modes[path])
+        try:
+            _restore_state(_contained_path(workspace, path, "restore target"), _FileState(originals[path], modes[path]))
+        except OSError as exc:
+            failure = failure or exc
+    return failure
 
 
 def _installation_payload(
-    workspace: Path, changes: tuple[PlannedChange, ...], backup_dir: PurePosixPath
+    workspace: Path,
+    changes: tuple[PlannedChange, ...],
+    backup_dir: PurePosixPath,
+    prior_metadata_existed: bool,
 ) -> dict[str, object]:
     try:
         config = load_workspace_config(workspace)
@@ -245,6 +245,7 @@ def _installation_payload(
         "artifacts": artifacts,
         "backup_dir": backup_dir.as_posix(),
         "methodology_version": methodology_version,
+        "prior_metadata_existed": prior_metadata_existed,
         "schema_version": schema_version,
     }
 
@@ -322,26 +323,89 @@ def _validate_backup_dir(workspace: Path, backup_dir: PurePosixPath) -> Path:
 
 def _validate_archive_path(backup: Path, archive: Path) -> None:
     try:
-        if archive.resolve(strict=True).relative_to(backup.resolve(strict=True)) and archive.is_symlink():
+        resolved_backup = backup.resolve(strict=True)
+        resolved_archive = archive.resolve(strict=False)
+        resolved_archive.relative_to(resolved_backup)
+        if resolved_archive != archive:
             raise ApplyError("backup file uses a symlink")
     except (OSError, ValueError) as exc:
         raise ApplyError("backup file escapes backup directory") from exc
 
 
-def _validate_rollback_backups(workspace: Path, backup: Path, artifacts: dict[object, object]) -> None:
-    for raw_path, record in artifacts.items():
+def _preflight_rollback(
+    workspace: Path, backup: Path, payload: dict[str, object], artifacts: dict[object, object]
+) -> tuple[tuple[_RollbackOperation, ...], tuple[PurePosixPath, ...], tuple[PurePosixPath, ...]]:
+    operations: list[_RollbackOperation] = []
+    changed: list[PurePosixPath] = []
+    adopted: list[PurePosixPath] = []
+    for raw_path, record in sorted(artifacts.items()):
         path = _safe_relative(raw_path, "artifact")
         if not isinstance(record, dict):
             raise ApplyError("invalid installation artifact")
-        if record.get("change_kind") in (ChangeKind.ADOPT_EXISTING.value, ChangeKind.CREATE.value):
+        _contained_path(workspace, path, "artifact")
+        _validate_no_symlink_alias(workspace, path, "artifact")
+        kind = record.get("change_kind")
+        if kind == ChangeKind.ADOPT_EXISTING.value:
+            adopted.append(path)
             continue
+        applied = record.get("applied_sha256")
+        if not isinstance(applied, str):
+            raise ApplyError(f"invalid applied hash for {path}")
+        target = _contained_path(workspace, path, "artifact")
+        actual = _sha256_bytes(target.read_bytes()) if target.exists() else None
+        if actual != applied:
+            raise ApplyError(f"{path} changed since installation")
         archive = backup / "files" / Path(*path.parts)
-        if not archive.is_file():
-            raise ApplyError(f"backup is incomplete for {path}")
         _validate_archive_path(backup, archive)
+        if kind == ChangeKind.CREATE.value:
+            operations.append(_RollbackOperation(path, _FileState(None, None)))
+        elif not archive.is_file():
+            raise ApplyError(f"backup is incomplete for {path}")
+        else:
+            operations.append(
+                _RollbackOperation(path, _FileState(archive.read_bytes(), stat.S_IMODE(archive.stat().st_mode)))
+            )
+        changed.append(path)
     archived_metadata = backup / "files" / Path(*_METADATA_PATH.parts)
-    if (workspace / _METADATA_PATH).exists() and archived_metadata.exists():
-        _validate_archive_path(backup, archived_metadata)
+    _validate_archive_path(backup, archived_metadata)
+    prior_metadata_existed = payload.get("prior_metadata_existed")
+    if not isinstance(prior_metadata_existed, bool):
+        raise ApplyError("invalid prior metadata condition")
+    if prior_metadata_existed and not archived_metadata.is_file():
+        raise ApplyError("backup is incomplete for prior metadata")
+    metadata_replacement = (
+        _FileState(archived_metadata.read_bytes(), stat.S_IMODE(archived_metadata.stat().st_mode))
+        if prior_metadata_existed
+        else _FileState(None, None)
+    )
+    operations.append(_RollbackOperation(_METADATA_PATH, metadata_replacement))
+    return tuple(operations), tuple(changed), tuple(adopted)
+
+
+def _capture_state(workspace: Path, path: PurePosixPath) -> _FileState:
+    target = _contained_path(workspace, path, "rollback target")
+    if not target.exists():
+        return _FileState(None, None)
+    return _FileState(target.read_bytes(), stat.S_IMODE(target.stat().st_mode))
+
+
+def _restore_states(
+    workspace: Path, touched: list[PurePosixPath], states: dict[PurePosixPath, _FileState]
+) -> OSError | None:
+    failure: OSError | None = None
+    for path in reversed(touched):
+        try:
+            _restore_state(_contained_path(workspace, path, "rollback recovery target"), states[path])
+        except OSError as exc:
+            failure = failure or exc
+    return failure
+
+
+def _restore_state(path: Path, state: _FileState) -> None:
+    if state.content is None:
+        _remove_created_target(path)
+    else:
+        _atomic_write(path, state.content, state.mode)
 
 
 def _remove_created_target(path: Path) -> None:

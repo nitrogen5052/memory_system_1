@@ -126,6 +126,25 @@ def test_adoption_records_ownership_without_rewriting_existing_bytes(tmp_path: P
     }
 
 
+def test_rollback_of_adoption_leaves_post_adoption_bytes_unchanged(tmp_path: Path) -> None:
+    target = tmp_path / "registry.md"
+    target.write_bytes(b"already generated\n")
+    plan = Plan(
+        tmp_path,
+        (_change("registry.md", ChangeKind.ADOPT_EXISTING, "already generated\n", None),),
+        (),
+    )
+    applied = apply_plan(plan, confirmed=True)
+    assert applied.backup_dir is not None
+    target.write_bytes(b"user-owned update\n")
+
+    result = rollback_installation(tmp_path, applied.backup_dir)
+
+    assert result.adopted_paths == (PurePosixPath("registry.md"),)
+    assert target.read_bytes() == b"user-owned update\n"
+    assert not (tmp_path / ".memory-system/installation.json").exists()
+
+
 def test_apply_refuses_conflicts_without_writing(prepared_plan: Plan) -> None:
     plan = Plan(prepared_plan.workspace, prepared_plan.changes, (_change("bad.md", ChangeKind.CONFLICT, None, None),))
 
@@ -212,6 +231,100 @@ def test_rollback_refuses_incomplete_backup_without_deleting_a_rewritten_file(
         rollback_installation(prepared_plan.workspace, applied.backup_dir)
 
     assert (prepared_plan.workspace / "managed.md").read_bytes() == b"after managed\n"
+
+
+def test_rollback_preflights_later_symlink_before_restoring_earlier_target(prepared_plan: Plan) -> None:
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    outside = prepared_plan.workspace.parent / "outside-managed.md"
+    outside.write_bytes(b"outside\n")
+    managed = prepared_plan.workspace / "managed.md"
+    managed.unlink()
+    managed.symlink_to(outside)
+
+    with pytest.raises(ApplyError, match="symlink"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert (prepared_plan.workspace / "AGENTS.md").read_bytes() == b"after authority\n"
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_rollback_requires_archived_prior_metadata_before_mutating(prepared_plan: Plan) -> None:
+    prior = b'{"artifacts": {"legacy.md": {}}}\n'
+    metadata = prepared_plan.workspace / ".memory-system/installation.json"
+    metadata.parent.mkdir()
+    metadata.write_bytes(prior)
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    backup = prepared_plan.workspace.joinpath(*applied.backup_dir.parts)
+    (backup / "files/.memory-system/installation.json").unlink()
+
+    with pytest.raises(ApplyError, match="prior metadata"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert (prepared_plan.workspace / "AGENTS.md").read_bytes() == b"after authority\n"
+    assert metadata.exists()
+
+
+def test_apply_recovers_when_atomic_write_raises_after_replace(
+    prepared_plan: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_system.installer as installer
+
+    real_write = installer._atomic_write
+
+    def replace_then_fail(path: Path, content: bytes, mode: int | None) -> None:
+        real_write(path, content, mode)
+        raise OSError("injected post-replace failure")
+
+    monkeypatch.setattr(installer, "_atomic_write", replace_then_fail)
+
+    with pytest.raises(ApplyError, match="post-replace"):
+        apply_plan(prepared_plan, confirmed=True)
+
+    assert (prepared_plan.workspace / "AGENTS.md").read_bytes() == b"before authority\n"
+    assert not (prepared_plan.workspace / ".memory-system/installation.json").exists()
+
+
+def test_rollback_refuses_an_edited_installed_artifact(prepared_plan: Plan) -> None:
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    agents = prepared_plan.workspace / "AGENTS.md"
+    agents.write_bytes(b"user edit after install\n")
+
+    with pytest.raises(ApplyError, match="changed since installation"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert agents.read_bytes() == b"user edit after install\n"
+    assert (prepared_plan.workspace / "managed.md").read_bytes() == b"after managed\n"
+
+
+def test_rollback_recovers_pre_rollback_state_after_mid_restore_failure(
+    prepared_plan: Plan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import memory_system.installer as installer
+
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    real_write = installer._atomic_write
+    calls = 0
+
+    def fail_second_restore(path: Path, content: bytes, mode: int | None) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected rollback failure")
+        real_write(path, content, mode)
+
+    monkeypatch.setattr(installer, "_atomic_write", fail_second_restore)
+
+    with pytest.raises(ApplyError, match="injected rollback failure"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+    assert (prepared_plan.workspace / "AGENTS.md").read_bytes() == b"after authority\n"
+    assert (prepared_plan.workspace / "managed.md").read_bytes() == b"after managed\n"
+    assert (prepared_plan.workspace / "_memory/Context/projects/workspace.md").read_bytes() == b"curated state\n"
+    assert (prepared_plan.workspace / ".memory-system/installation.json").exists()
 
 
 @pytest.mark.parametrize("backup_dir", [PurePosixPath("/tmp/backup"), PurePosixPath("../backup")])
