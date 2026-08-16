@@ -122,6 +122,33 @@ def test_discovers_official_claude_mem_plugin_version(tmp_path: Path) -> None:
     assert runtime.discover_installed_versions(tmp_path) == ("13.15.0",)
 
 
+def test_manifest_scanner_decodes_only_official_package_name_and_version(tmp_path: Path) -> None:
+    runtime = _runtime()
+    package = tmp_path / ".claude" / "plugins" / "cache" / "claude-mem" / "package.json"
+    package.parent.mkdir(parents=True)
+    package.write_text(
+        '''{
+  "credential": "top-level-secret",
+  "nested": {"token": "nested-secret", "values": ["array-secret"]},
+  "name": "claude-mem",
+  "version": "13.15.0"
+}''',
+        encoding="utf-8",
+    )
+    decoded: list[str] = []
+
+    def decode_string(raw: str) -> str:
+        assert "secret" not in raw
+        decoded.append(raw)
+        return json.loads(raw)
+
+    fields = runtime._scan_package_fields(package.read_text(encoding="utf-8"), decode_string)
+
+    assert fields == ("claude-mem", "13.15.0")
+    assert decoded == ['"claude-mem"', '"13.15.0"']
+    assert runtime.discover_installed_versions(tmp_path) == ("13.15.0",)
+
+
 def test_worker_probe_accepts_only_json_http_200(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _runtime()
     seen: dict[str, object] = {}
@@ -151,6 +178,27 @@ def test_worker_probe_accepts_only_json_http_200(monkeypatch: pytest.MonkeyPatch
         "url": "http://127.0.0.1:37742/api/search?query=%2A&limit=1",
         "timeout": 2.0,
     }
+
+
+def test_worker_probe_accepts_valid_json_without_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _runtime()
+
+    class Response:
+        status = 200
+        headers = {}
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"results": []}'
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", lambda request, timeout: Response())
+
+    assert runtime.probe_worker(37742) is True
 
 
 def test_worker_probe_rejects_http_200_with_malformed_json(monkeypatch: pytest.MonkeyPatch) -> None:

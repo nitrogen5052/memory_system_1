@@ -7,8 +7,9 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import sys
-from typing import Mapping
+from typing import Callable, Mapping
 import urllib.error
 import urllib.request
 
@@ -20,6 +21,7 @@ _DEFAULT_PORT = 37700
 _SUPPORTED_SCHEMA_VERSION = 1
 _SUPPORTED_METHODOLOGY_VERSION = "1.0"
 _OFFICIAL_PACKAGE_NAMES = frozenset({"claude-mem", "@thedotmack/claude-mem"})
+_JSON_NUMBER = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
 
 @dataclass(frozen=True)
@@ -85,8 +87,7 @@ def probe_worker(port: int, timeout_seconds: float = 2.0) -> bool:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            content_type = response.headers.get("Content-Type", "")
-            if response.status != 200 or "application/json" not in content_type.lower():
+            if response.status != 200:
                 return False
             json.loads(response.read())
             return True
@@ -165,13 +166,131 @@ def _port(value: object) -> int | None:
 def _read_package(path: Path) -> str | None:
     try:
         with path.open(encoding="utf-8") as source:
-            data = json.load(source)
-    except (OSError, json.JSONDecodeError):
+            fields = _scan_package_fields(source.read())
+    except (OSError, ValueError):
         return None
-    if not isinstance(data, dict) or data.get("name") not in _OFFICIAL_PACKAGE_NAMES:
+    if fields is None:
         return None
-    version = data.get("version")
-    return version if isinstance(version, str) and version else None
+    name, version = fields
+    return version if name in _OFFICIAL_PACKAGE_NAMES and version else None
+
+
+def _scan_package_fields(
+    source: str, decode_string: Callable[[str], object] = json.loads
+) -> tuple[str | None, str | None] | None:
+    """Read only top-level package name/version strings, skipping all other JSON values."""
+    try:
+        index = _skip_whitespace(source, 0)
+        if index >= len(source) or source[index] != "{":
+            return None
+        index = _skip_whitespace(source, index + 1)
+        name: str | None = None
+        version: str | None = None
+        while index < len(source) and source[index] != "}":
+            key_start = index
+            index = _skip_string(source, index)
+            key = source[key_start:index]
+            index = _skip_whitespace(source, index)
+            if index >= len(source) or source[index] != ":":
+                return None
+            index = _skip_whitespace(source, index + 1)
+            if key in ('"name"', '"version"') and index < len(source) and source[index] == '"':
+                value_start = index
+                index = _skip_string(source, index)
+                value = decode_string(source[value_start:index])
+                if not isinstance(value, str):
+                    return None
+                if key == '"name"':
+                    name = value
+                else:
+                    version = value
+            else:
+                index = _skip_value(source, index)
+            index = _skip_whitespace(source, index)
+            if index < len(source) and source[index] == ",":
+                index = _skip_whitespace(source, index + 1)
+            elif index >= len(source) or source[index] != "}":
+                return None
+        if index >= len(source) or source[index] != "}":
+            return None
+        return (name, version) if _skip_whitespace(source, index + 1) == len(source) else None
+    except (IndexError, ValueError):
+        return None
+
+
+def _skip_value(source: str, index: int) -> int:
+    index = _skip_whitespace(source, index)
+    if index >= len(source):
+        raise ValueError("missing JSON value")
+    token = source[index]
+    if token == '"':
+        return _skip_string(source, index)
+    if token == "{":
+        index = _skip_whitespace(source, index + 1)
+        while index < len(source) and source[index] != "}":
+            index = _skip_string(source, index)
+            index = _skip_whitespace(source, index)
+            if index >= len(source) or source[index] != ":":
+                raise ValueError("invalid JSON object")
+            index = _skip_whitespace(source, _skip_value(source, index + 1))
+            if index < len(source) and source[index] == ",":
+                index = _skip_whitespace(source, index + 1)
+            elif index >= len(source) or source[index] != "}":
+                raise ValueError("invalid JSON object")
+        if index >= len(source):
+            raise ValueError("unterminated JSON object")
+        return index + 1
+    if token == "[":
+        index = _skip_whitespace(source, index + 1)
+        while index < len(source) and source[index] != "]":
+            index = _skip_whitespace(source, _skip_value(source, index))
+            if index < len(source) and source[index] == ",":
+                index = _skip_whitespace(source, index + 1)
+            elif index >= len(source) or source[index] != "]":
+                raise ValueError("invalid JSON array")
+        if index >= len(source):
+            raise ValueError("unterminated JSON array")
+        return index + 1
+    for literal in ("true", "false", "null"):
+        if source.startswith(literal, index):
+            return index + len(literal)
+    number = _JSON_NUMBER.match(source, index)
+    if number is not None:
+        return number.end()
+    raise ValueError("invalid JSON value")
+
+
+def _skip_string(source: str, index: int) -> int:
+    if index >= len(source) or source[index] != '"':
+        raise ValueError("expected JSON string")
+    index += 1
+    while index < len(source):
+        character = source[index]
+        if character == '"':
+            return index + 1
+        if character == "\\":
+            index += 1
+            if index >= len(source):
+                raise ValueError("unterminated JSON escape")
+            if source[index] == "u":
+                if len(source) < index + 5 or any(
+                    character not in "0123456789abcdefABCDEF" for character in source[index + 1 : index + 5]
+                ):
+                    raise ValueError("invalid JSON unicode escape")
+                index += 5
+                continue
+            if source[index] not in '"\\/bfnrt':
+                raise ValueError("invalid JSON escape")
+        elif ord(character) < 0x20:
+            raise ValueError("invalid JSON control character")
+        index += 1
+    raise ValueError("unterminated JSON string")
+
+
+def _skip_whitespace(source: str, index: int) -> int:
+    while index < len(source) and source[index] in " \t\r\n":
+        index += 1
+    return index
 
 
 def _valid_compatibility(compatibility: Compatibility) -> bool:
