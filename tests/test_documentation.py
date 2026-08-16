@@ -34,7 +34,7 @@ def _readme_memory_system_commands() -> list[tuple[str, ...]]:
     commands = []
     for line in README.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line.startswith("memory-system "):
+        if line.startswith(".venv/bin/memory-system "):
             commands.append(tuple(shlex.split(line)[1:]))
     return commands
 
@@ -42,6 +42,8 @@ def _readme_memory_system_commands() -> list[tuple[str, ...]]:
 def test_readme_memory_system_commands_parse_through_main(tmp_path: Path, capsys) -> None:
     commands = _readme_memory_system_commands()
 
+    assert "python3 -m venv .venv" in README.read_text(encoding="utf-8")
+    assert ".venv/bin/python -m pip install ." in README.read_text(encoding="utf-8")
     assert commands
     for command in commands:
         status = main((*command, "--workspace", str(tmp_path)))
@@ -104,6 +106,14 @@ def test_templates_are_packaged_in_an_installed_wheel(tmp_path: Path) -> None:
     subprocess.run(
         [str(python), "-m", "pip", "install", "--no-index", "--no-deps", str(wheel)], check=True
     )
+    console_script = environment / ("Scripts/memory-system.exe" if os.name == "nt" else "bin/memory-system")
+    help_result = subprocess.run([str(console_script), "--help"], check=True, capture_output=True, text=True)
+    plan_result = subprocess.run(
+        [str(console_script), "plan", "--workspace", str(EXAMPLE)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     result = subprocess.run(
         [
             str(python),
@@ -118,6 +128,8 @@ def test_templates_are_packaged_in_an_installed_wheel(tmp_path: Path) -> None:
     )
 
     assert set(result.stdout.splitlines()) == TEMPLATES
+    assert "usage: memory-system" in help_result.stdout
+    assert "changes" in plan_result.stdout.casefold()
 
 
 def test_source_templates_are_available_to_the_renderer() -> None:

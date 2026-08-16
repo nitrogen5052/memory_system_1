@@ -13,15 +13,21 @@ git clone --branch v1.0.0 --depth 1 <repository-url> portable-project-memory
 cd portable-project-memory
 ```
 
+Create an isolated environment and install the checked-out release before invoking the CLI. The commands below avoid shell activation and work consistently on macOS, Linux, and WSL:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+```
+
 Copy the clean-room example into the workspace you want to manage, or adapt its relative paths and identities. The example contains a root plus two non-overlapping projects.
 
 ```sh
 cp -R examples/multi-project-workspace ./workspace
-cd workspace
-memory-system doctor --workspace .
-memory-system plan --workspace .
-memory-system apply --yes --workspace .
-memory-system verify --workspace .
+.venv/bin/memory-system doctor --workspace workspace
+.venv/bin/memory-system plan --workspace workspace
+.venv/bin/memory-system apply --yes --workspace workspace
+.venv/bin/memory-system verify --workspace workspace
 ```
 
 Always inspect the complete `plan` output before running `apply`. `apply --yes` is suitable for reviewed, non-interactive use only; without `--yes`, an interactive terminal asks for confirmation.
@@ -29,7 +35,7 @@ Always inspect the complete `plan` output before running `apply`. `apply --yes` 
 If a reviewed installation needs to be undone, use the backup path printed by `apply`:
 
 ```sh
-memory-system rollback --backup .memory-system/backups/<backup-id> --workspace .
+.venv/bin/memory-system rollback --backup .memory-system/backups/<backup-id> --workspace workspace
 ```
 
 ## Safety boundaries
