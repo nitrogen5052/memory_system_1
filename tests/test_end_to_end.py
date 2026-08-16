@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 from memory_system.cli import main
 
@@ -60,3 +61,24 @@ def test_fresh_apply_verify_and_reapply_are_idempotent(tmp_path: Path, capsys) -
 
     assert "No changes" in second_output
     assert _hashes(tmp_path) == first_hashes
+
+
+def test_canonical_example_apply_verify_and_reapply_are_idempotent(
+    tmp_path: Path, capsys
+) -> None:
+    example = Path(__file__).resolve().parents[1] / "examples/multi-project-workspace"
+    workspace = tmp_path / "multi-project-workspace"
+    shutil.copytree(example, workspace)
+    args = ("--workspace", str(workspace))
+
+    assert main(("plan", *args)) == 0
+    assert main(("apply", "--yes", *args)) == 0
+    assert main(("verify", *args)) == 0
+    capsys.readouterr()
+    first_hashes = _hashes(workspace)
+
+    assert main(("apply", "--yes", *args)) == 0
+    second_output = capsys.readouterr().out
+
+    assert "No changes" in second_output
+    assert _hashes(workspace) == first_hashes
