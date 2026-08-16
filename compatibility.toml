@@ -1,0 +1,7 @@
+schema_version = 1
+methodology_version = "1.0"
+
+[claude_mem]
+minimum_version = "13.15.0"
+tested_versions = ["13.15.0"]
+default_worker_port = 37700
