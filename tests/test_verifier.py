@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -194,3 +195,58 @@ def test_require_runtime_promotes_missing_runtime_to_failure(
 
     assert not report.ok
     assert not _check(report, "runtime-health").passed
+
+
+@pytest.mark.parametrize(
+    ("runtime_attribute", "value"),
+    [
+        ("version_info", (3, 10, 14)),
+        ("platform", "win32"),
+    ],
+    ids=("python-too-old", "unsupported-platform"),
+)
+def test_require_runtime_promotes_doctor_errors_to_failure(
+    deployed_workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_attribute: str,
+    value: object,
+) -> None:
+    """Any hard doctor diagnostic must fail strict runtime verification."""
+    import memory_system.runtime as runtime
+
+    monkeypatch.setattr(runtime.sys, runtime_attribute, value)
+    monkeypatch.setattr(runtime, "discover_installed_versions", lambda home: ("13.15.0",))
+    monkeypatch.setattr(runtime, "probe_worker", lambda port: True)
+
+    report = verify_workspace(deployed_workspace, require_runtime=True)
+
+    assert not report.ok
+    assert not _check(report, "runtime-health").passed
+
+
+def test_verify_rejects_missing_orphaned_managed_artifact(deployed_workspace: Path) -> None:
+    """A recorded managed artifact must not silently disappear after configuration changes."""
+    payload = _metadata(deployed_workspace)
+    payload["artifacts"]["retired-managed.md"] = {
+        "ownership": "managed",
+        "original_sha256": None,
+        "applied_sha256": hashlib.sha256(b"retired\n").hexdigest(),
+    }
+    _write_metadata(deployed_workspace, payload)
+
+    assert not _check(verify_workspace(deployed_workspace), "managed-hashes").passed
+
+
+def test_verify_rejects_drifting_orphaned_managed_artifact(deployed_workspace: Path) -> None:
+    """A recorded managed artifact must match its applied hash even when no longer configured."""
+    orphan = deployed_workspace / "retired-managed.md"
+    orphan.write_text("drifted\n", encoding="utf-8")
+    payload = _metadata(deployed_workspace)
+    payload["artifacts"]["retired-managed.md"] = {
+        "ownership": "managed",
+        "original_sha256": None,
+        "applied_sha256": hashlib.sha256(b"expected\n").hexdigest(),
+    }
+    _write_metadata(deployed_workspace, payload)
+
+    assert not _check(verify_workspace(deployed_workspace), "managed-hashes").passed

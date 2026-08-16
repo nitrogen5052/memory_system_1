@@ -164,16 +164,22 @@ def _managed_hash_check(
     artifacts = metadata.get("artifacts")
     if not isinstance(artifacts, dict):
         return VerificationCheck("managed-hashes", False, "installation metadata has no artifact records")
-    managed = [PurePosixPath("_memory/Context/project-registry.md"), PurePosixPath("_memory/Context/active-state-index.md")]
-    managed.extend(config.root_authority)
-    managed.extend(path for project in config.projects for path in project.authority)
-    for path in managed:
-        record = artifacts.get(path.as_posix())
+    for raw_path, record in artifacts.items():
+        if not isinstance(record, dict) or record.get("ownership") != "managed":
+            continue
+        path = PurePosixPath(raw_path) if isinstance(raw_path, str) else None
+        if path is None or path.is_absolute() or ".." in path.parts:
+            return VerificationCheck("managed-hashes", False, "managed metadata path is unsafe")
+        target = _target(workspace, path)
         try:
-            actual = hashlib.sha256(_target(workspace, path).read_bytes()).hexdigest()
-        except OSError as exc:
+            resolved = target.resolve(strict=True)
+            resolved.relative_to(workspace)
+        except (OSError, ValueError) as exc:
             return VerificationCheck("managed-hashes", False, f"managed artifact is unavailable: {path}: {exc}")
-        if not isinstance(record, dict) or record.get("ownership") != "managed" or record.get("applied_sha256") != actual:
+        if resolved != target or not target.is_file():
+            return VerificationCheck("managed-hashes", False, f"managed artifact is not a contained regular file: {path}")
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if record.get("applied_sha256") != actual:
             return VerificationCheck("managed-hashes", False, f"managed artifact hash drift: {path}")
     for state in (config.root_state, *(project.state for project in config.projects)):
         record = artifacts.get(state.as_posix())
@@ -229,7 +235,11 @@ def _runtime_health_check(workspace: Path, require_runtime: bool) -> Verificatio
         doctor = run_doctor(load_compatibility(workspace / "compatibility.toml"))
     except (ConfigError, OSError) as exc:
         return VerificationCheck("runtime-health", not require_runtime, f"runtime check unavailable: {exc}")
-    issues = tuple(diagnostic for diagnostic in doctor.diagnostics if diagnostic.code in _RUNTIME_FAILURE_CODES)
+    issues = tuple(
+        diagnostic
+        for diagnostic in doctor.diagnostics
+        if diagnostic.severity == "error" or diagnostic.code in _RUNTIME_FAILURE_CODES
+    )
     if not issues:
         return VerificationCheck("runtime-health", True, "runtime health is compatible and reachable")
     message = "; ".join(diagnostic.message for diagnostic in issues)
