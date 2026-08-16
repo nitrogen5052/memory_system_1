@@ -136,6 +136,52 @@ def test_recorded_artifacts_produce_no_change(example_workspace: Path) -> None:
     assert plan.conflicts == ()
 
 
+def test_recorded_generated_artifact_with_applied_hash_drift_is_a_conflict(
+    example_workspace: Path,
+) -> None:
+    config = _config(example_workspace)
+    expected = _expected_artifacts(config)
+    _install_recorded_artifacts(example_workspace, expected)
+    _set_applied_hash(example_workspace, "_memory/Context/project-registry.md", "0" * 64)
+
+    plan = build_plan(example_workspace)
+
+    assert [(change.path.as_posix(), change.kind) for change in plan.conflicts] == [
+        ("_memory/Context/project-registry.md", ChangeKind.CONFLICT)
+    ]
+    assert "applied" in plan.conflicts[0].reason
+
+
+def test_recorded_managed_authority_with_applied_hash_drift_is_a_conflict(
+    example_workspace: Path,
+) -> None:
+    config = _config(example_workspace)
+    expected = _expected_artifacts(config)
+    _install_recorded_artifacts(example_workspace, expected)
+    _set_applied_hash(example_workspace, "AGENTS.md", "0" * 64)
+
+    plan = build_plan(example_workspace)
+
+    assert [(change.path.as_posix(), change.kind) for change in plan.conflicts] == [
+        ("AGENTS.md", ChangeKind.CONFLICT)
+    ]
+    assert "applied" in plan.conflicts[0].reason
+
+
+def test_deleted_recorded_curated_state_is_a_conflict(example_workspace: Path) -> None:
+    config = _config(example_workspace)
+    expected = _expected_artifacts(config)
+    _install_recorded_artifacts(example_workspace, expected)
+    (example_workspace / config.root_state).unlink()
+
+    plan = build_plan(example_workspace)
+
+    assert [(change.path.as_posix(), change.kind) for change in plan.conflicts] == [
+        (config.root_state.as_posix(), ChangeKind.CONFLICT)
+    ]
+    assert "deleted" in plan.conflicts[0].reason
+
+
 def test_unrecorded_existing_state_file_is_a_conflict(example_workspace: Path) -> None:
     state = example_workspace / "_memory/Context/projects/workspace.md"
     state.parent.mkdir(parents=True)
@@ -222,8 +268,24 @@ def _record_artifacts(workspace: Path, artifacts: dict[str, str]) -> None:
     for path, content in artifacts.items():
         records[path] = {
             "ownership": "curated" if "/projects/" in path else "managed",
-            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "original_sha256": hashlib.sha256(b"").hexdigest(),
+            "applied_sha256": hashlib.sha256(content.encode()).hexdigest(),
         }
     metadata = workspace / ".memory-system/installation.json"
     metadata.parent.mkdir()
     metadata.write_text(json.dumps({"artifacts": records}), encoding="utf-8")
+
+
+def _install_recorded_artifacts(workspace: Path, artifacts: dict[str, str]) -> None:
+    for path, content in artifacts.items():
+        target = workspace / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _record_artifacts(workspace, artifacts)
+
+
+def _set_applied_hash(workspace: Path, path: str, applied_sha256: str) -> None:
+    metadata = workspace / ".memory-system/installation.json"
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload["artifacts"][path]["applied_sha256"] = applied_sha256
+    metadata.write_text(json.dumps(payload), encoding="utf-8")

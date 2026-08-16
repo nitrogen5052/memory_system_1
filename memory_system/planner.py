@@ -132,10 +132,13 @@ def _plan_generated(
     before = _read(workspace, path)
     if before is None:
         changes.append(_change(path, ChangeKind.CREATE, None, content, "generated artifact is absent"))
-    elif before == content and _owned(record, "managed"):
+    elif before == content and _owned(record, "managed") and _matches_applied(record, before):
         return
     elif before == content:
-        changes.append(_change(path, ChangeKind.ADOPT_EXISTING, before, None, "exact generated artifact"))
+        if _owned(record, "managed"):
+            conflicts.append(_conflict(path, before, "managed generated artifact differs from applied hash"))
+        else:
+            changes.append(_change(path, ChangeKind.ADOPT_EXISTING, before, None, "exact generated artifact"))
     elif _owned(record, "managed"):
         changes.append(_change(path, ChangeKind.UPDATE_GENERATED, before, content, "managed generated artifact changed"))
     else:
@@ -151,11 +154,13 @@ def _plan_state(
     conflicts: list[PlannedChange],
 ) -> None:
     before = _read(workspace, path)
-    if before is None:
+    if before is None and _owned(record, "curated"):
+        conflicts.append(_conflict(path, None, "recorded curated state was deleted"))
+    elif before is None:
         changes.append(_change(path, ChangeKind.CREATE, None, content, "curated state is absent"))
     elif not _owned(record, "curated"):
         conflicts.append(_conflict(path, before, "unrecorded pre-existing state file"))
-    elif record.get("sha256") != _sha256(before):
+    elif not _matches_applied(record, before):
         conflicts.append(_conflict(path, before, "curated state does not match recorded content"))
 
 
@@ -177,10 +182,13 @@ def _plan_authority(
     except ManagedBlockConflict as exc:
         conflicts.append(_conflict(path, before, str(exc)))
         return
-    if after == before and _owned(record, "managed"):
+    if after == before and _owned(record, "managed") and _matches_applied(record, before):
         return
     elif after == before:
-        changes.append(_change(path, ChangeKind.ADOPT_EXISTING, before, None, "exact managed block"))
+        if _owned(record, "managed"):
+            conflicts.append(_conflict(path, before, "managed authority differs from applied hash"))
+        else:
+            changes.append(_change(path, ChangeKind.ADOPT_EXISTING, before, None, "exact managed block"))
     else:
         changes.append(
             _change(path, ChangeKind.UPDATE_MANAGED_BLOCK, before, after, "managed block differs")
@@ -226,6 +234,10 @@ def _is_symlink_alias(workspace: Path, path: PurePosixPath) -> bool:
 
 def _owned(record: dict[str, str] | None, ownership: str) -> bool:
     return record is not None and record.get("ownership") == ownership
+
+
+def _matches_applied(record: dict[str, str] | None, content: str) -> bool:
+    return record is not None and record.get("applied_sha256") == _sha256(content)
 
 
 def _change(
