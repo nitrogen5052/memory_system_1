@@ -250,3 +250,22 @@ def test_verify_rejects_drifting_orphaned_managed_artifact(deployed_workspace: P
     _write_metadata(deployed_workspace, payload)
 
     assert not _check(verify_workspace(deployed_workspace), "managed-hashes").passed
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "AGENTS.md",
+        "_memory/Context/project-registry.md",
+        "_memory/Context/active-state-index.md",
+    ),
+)
+def test_verify_rejects_missing_configured_managed_record(
+    deployed_workspace: Path, path: str
+) -> None:
+    """Configured managed artifacts must retain their managed metadata record."""
+    payload = _metadata(deployed_workspace)
+    del payload["artifacts"][path]
+    _write_metadata(deployed_workspace, payload)
+
+    assert not _check(verify_workspace(deployed_workspace), "managed-hashes").passed

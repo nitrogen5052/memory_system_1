@@ -164,6 +164,16 @@ def _managed_hash_check(
     artifacts = metadata.get("artifacts")
     if not isinstance(artifacts, dict):
         return VerificationCheck("managed-hashes", False, "installation metadata has no artifact records")
+    configured = [
+        PurePosixPath("_memory/Context/project-registry.md"),
+        PurePosixPath("_memory/Context/active-state-index.md"),
+        *config.root_authority,
+        *(path for project in config.projects for path in project.authority),
+    ]
+    for path in configured:
+        record = artifacts.get(path.as_posix())
+        if not isinstance(record, dict) or record.get("ownership") != "managed":
+            return VerificationCheck("managed-hashes", False, f"managed artifact record is missing: {path}")
     for raw_path, record in artifacts.items():
         if not isinstance(record, dict) or record.get("ownership") != "managed":
             continue
