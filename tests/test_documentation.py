@@ -90,6 +90,23 @@ def test_onboarding_and_upgrade_docs_are_reproducible() -> None:
     assert "https://github.com/thedotmack/claude-mem#quick-start" in installation
 
 
+def test_documented_upgrade_workflow_targets_an_explicit_workspace(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    workspace = tmp_path / "managed-workspace"
+    checkout = tmp_path / "tool-checkout"
+    shutil.copytree(EXAMPLE, workspace)
+    checkout.mkdir()
+    upgrades = (REPOSITORY / "docs/upgrades.md").read_text(encoding="utf-8")
+
+    assert 'WORKSPACE="/absolute/path/to/existing-workspace"' in upgrades
+    assert '--workspace "$WORKSPACE"' in upgrades
+    monkeypatch.chdir(checkout)
+    for command in (("doctor",), ("plan",), ("apply", "--yes"), ("verify",)):
+        assert main((*command, "--workspace", str(workspace))) == 0
+        capsys.readouterr()
+
+
 def test_example_has_two_isolated_child_projects() -> None:
     config = load_workspace_config(EXAMPLE)
 

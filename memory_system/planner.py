@@ -252,6 +252,8 @@ def _plan_retirements(
                 continue
             block_id = record["block_id"]
             try:
+                if tuple(managed_block_ids(before)) != (block_id,):
+                    raise ManagedBlockConflict("managed block owner does not match installation record")
                 if not _matches_managed_block(record, before, block_id):
                     raise ManagedBlockConflict("managed authority differs from applied block hash")
                 after = remove_managed_block(before, block_id)

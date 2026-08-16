@@ -233,15 +233,15 @@ def _installation_payload(
             raise ApplyError("could not load workspace configuration") from exc
         schema_version, methodology_version = 1, "unknown"
     artifacts = _prior_artifacts(workspace)
-    retired: list[dict[str, object]] = []
+    transaction_artifacts: list[dict[str, object]] = []
     for change in changes:
         if change.kind is ChangeKind.RETIRE_CURATED_STATE:
             artifacts.pop(change.path.as_posix(), None)
             continue
         record = _artifact_record(workspace, change)
+        transaction_artifacts.append({"path": change.path.as_posix(), "record": record})
         if change.kind is ChangeKind.RETIRE_MANAGED_BLOCK:
             artifacts.pop(change.path.as_posix(), None)
-            retired.append({"path": change.path.as_posix(), "record": record})
         else:
             artifacts[change.path.as_posix()] = record
     return {
@@ -251,8 +251,8 @@ def _installation_payload(
         "methodology_version": methodology_version,
         "prior_metadata_existed": prior_metadata_existed,
         "schema_version": schema_version,
-        "metadata_schema_version": 2,
-        "rollback_artifacts": retired,
+        "metadata_schema_version": 3,
+        "rollback_artifacts": transaction_artifacts,
     }
 
 
@@ -384,10 +384,18 @@ def _preflight_rollback(
     operations: list[_RollbackOperation] = []
     changed: list[PurePosixPath] = []
     adopted: list[PurePosixPath] = []
-    rollback_records: dict[object, object] = dict(artifacts)
+    rollback_records: dict[object, object]
     raw_retired = payload.get("rollback_artifacts", [])
     if not isinstance(raw_retired, list):
         raise ApplyError("invalid rollback artifact metadata")
+    if payload.get("metadata_schema_version") == 3:
+        rollback_records = {}
+    elif payload.get("metadata_schema_version") == 2:
+        raise ApplyError("schema-2 installation metadata lacks a safe transaction rollback journal")
+    else:
+        # Schema-1 metadata predates the carried-forward inventory and retains
+        # its established single-install rollback behavior.
+        rollback_records = dict(artifacts)
     for entry in raw_retired:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(entry.get("record"), dict):
             raise ApplyError("invalid rollback artifact metadata")

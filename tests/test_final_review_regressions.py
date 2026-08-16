@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from memory_system.cli import main
+from memory_system.installer import rollback_installation
 from memory_system.planner import ChangeKind, build_plan
 from memory_system.templates import render_project_protocol, render_root_protocol, upsert_managed_block
 from memory_system.verifier import verify_workspace
@@ -181,3 +182,54 @@ def test_protocols_and_state_template_include_durable_recall_and_freshness_contr
     assert "canonical root" in rendered
     assert "last_verified" in rendered
     assert "last_reconciled" in rendered
+
+
+def test_upgrade_rollback_restores_only_latest_transaction_and_keeps_unchanged_files(tmp_path: Path, monkeypatch) -> None:
+    _write_workspace(tmp_path)
+    _apply(tmp_path)
+    unchanged = tmp_path / "_memory/Context/projects/alpha.md"
+    unchanged_bytes = unchanged.read_bytes()
+    import memory_system.planner as planner
+
+    original = planner.render_root_protocol
+    monkeypatch.setattr(planner, "render_root_protocol", lambda config: original(config) + "\nUpgrade body.\n")
+    second_plan = build_plan(tmp_path)
+    from memory_system.installer import apply_plan
+
+    second = apply_plan(second_plan, confirmed=True)
+    assert second.backup_dir is not None
+    rollback_installation(tmp_path, second.backup_dir)
+
+    assert unchanged.read_bytes() == unchanged_bytes
+    assert "Upgrade body." not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_retirement_rejects_extra_owner_even_when_recorded_block_digest_matches(tmp_path: Path) -> None:
+    _write_workspace(tmp_path)
+    _apply(tmp_path)
+    authority = tmp_path / "alpha/AGENTS.md"
+    authority.write_text(upsert_managed_block(authority.read_text(encoding="utf-8"), "root", "other owner\n"), encoding="utf-8")
+    _write_manifest(tmp_path, "memory-system.toml", ())
+
+    plan = build_plan(tmp_path)
+
+    assert plan.conflicts
+    assert "owner" in plan.conflicts[0].reason or "marker" in plan.conflicts[0].reason
+
+
+def test_verifier_rejects_wrong_canonical_root_and_invalid_freshness_values(tmp_path: Path) -> None:
+    _write_workspace(tmp_path)
+    _apply(tmp_path)
+    state = tmp_path / "_memory/Context/projects/alpha.md"
+    state.write_text(
+        state.read_text(encoding="utf-8")
+        .replace("canonical root: `alpha`", "canonical root: `wrong`")
+        .replace("last_verified: null", "last_verified: yesterday")
+        .replace("last_reconciled: null", "last_reconciled: 2026-08-16T12:00:00"),
+        encoding="utf-8",
+    )
+
+    report = verify_workspace(tmp_path)
+
+    assert not report.ok
+    assert next(check for check in report.checks if check.code == "state-schema").passed is False

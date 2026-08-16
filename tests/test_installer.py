@@ -266,6 +266,18 @@ def test_rollback_requires_archived_prior_metadata_before_mutating(prepared_plan
     assert metadata.exists()
 
 
+def test_rollback_refuses_schema_two_metadata_without_transaction_journal(prepared_plan: Plan) -> None:
+    applied = apply_plan(prepared_plan, confirmed=True)
+    assert applied.backup_dir is not None
+    metadata = prepared_plan.workspace / ".memory-system/installation.json"
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    payload["metadata_schema_version"] = 2
+    metadata.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ApplyError, match="safe transaction rollback journal"):
+        rollback_installation(prepared_plan.workspace, applied.backup_dir)
+
+
 def test_apply_recovers_when_atomic_write_raises_after_replace(
     prepared_plan: Plan, monkeypatch: pytest.MonkeyPatch
 ) -> None:

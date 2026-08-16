@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -102,7 +103,8 @@ def _registry_check(workspace: Path, config: WorkspaceConfig) -> VerificationChe
 
 
 def _state_schema_check(workspace: Path, config: WorkspaceConfig) -> VerificationCheck:
-    for state in (config.root_state, *(project.state for project in config.projects)):
+    state_roots = ((config.root_state, "."), *( (project.state, project.path.as_posix()) for project in config.projects))
+    for state, expected_root in state_roots:
         try:
             headings = tuple(
                 line[3:] for line in _target(workspace, state).read_text(encoding="utf-8").splitlines() if line.startswith("## ")
@@ -112,9 +114,31 @@ def _state_schema_check(workspace: Path, config: WorkspaceConfig) -> Verificatio
         if headings != _STATE_HEADINGS:
             return VerificationCheck("state-schema", False, f"state headings are invalid: {state}")
         content = _target(workspace, state).read_text(encoding="utf-8")
-        if "canonical root:" not in content or "last_verified:" not in content or "last_reconciled:" not in content:
+        if not _valid_state_freshness(content, expected_root):
             return VerificationCheck("state-schema", False, f"state freshness fields are invalid: {state}")
     return VerificationCheck("state-schema", True, "all curated state documents have the required headings")
+
+
+def _valid_state_freshness(content: str, expected_root: str) -> bool:
+    canonical = re.findall(r"^canonical root: `([^`]+)`$", content, re.MULTILINE)
+    verified = re.findall(r"^last_verified: (.+)$", content, re.MULTILINE)
+    reconciled = re.findall(r"^last_reconciled: (.+)$", content, re.MULTILINE)
+    return (
+        canonical == [expected_root]
+        and len(verified) == len(reconciled) == 1
+        and _valid_freshness_value(verified[0])
+        and _valid_freshness_value(reconciled[0])
+    )
+
+
+def _valid_freshness_value(value: str) -> bool:
+    if value == "null":
+        return True
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return timestamp.tzinfo is not None and timestamp.utcoffset() == timedelta(0)
 
 
 def _marker_check(workspace: Path, config: WorkspaceConfig) -> VerificationCheck:
