@@ -47,10 +47,10 @@ def test_readme_memory_system_commands_parse_through_main(tmp_path: Path, capsys
     assert "python3 -m venv .venv" in README.read_text(encoding="utf-8")
     assert ".venv/bin/python -m pip install ." in README.read_text(encoding="utf-8")
     assert commands
+    from memory_system.cli import _parser
+
     for command in commands:
-        status = main((*command, "--workspace", str(tmp_path)))
-        assert status in {0, 2, 3, 4, 5, 6}
-        capsys.readouterr()
+        _parser().parse_args((*command, "--workspace", str(tmp_path)))
 
 
 def test_documented_quick_start_commands_succeed_in_order(tmp_path: Path, capsys) -> None:
