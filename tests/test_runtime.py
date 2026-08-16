@@ -149,6 +149,28 @@ def test_manifest_scanner_decodes_only_official_package_name_and_version(tmp_pat
     assert runtime.discover_installed_versions(tmp_path) == ("13.15.0",)
 
 
+def test_discovers_version_when_name_key_uses_json_escape(tmp_path: Path) -> None:
+    runtime = _runtime()
+    package = tmp_path / ".claude" / "plugins" / "cache" / "claude-mem" / "package.json"
+    package.parent.mkdir(parents=True)
+    package.write_text(
+        '{"na\\u006de":"claude-mem","version":"13.15.0"}', encoding="utf-8"
+    )
+
+    assert runtime.discover_installed_versions(tmp_path) == ("13.15.0",)
+
+
+def test_discovers_version_when_version_key_uses_json_escape(tmp_path: Path) -> None:
+    runtime = _runtime()
+    package = tmp_path / ".codex" / "plugins" / "cache" / "claude-mem" / "package.json"
+    package.parent.mkdir(parents=True)
+    package.write_text(
+        '{"name":"claude-mem","vers\\u0069on":"13.15.0"}', encoding="utf-8"
+    )
+
+    assert runtime.discover_installed_versions(tmp_path) == ("13.15.0",)
+
+
 def test_worker_probe_accepts_only_json_http_200(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _runtime()
     seen: dict[str, object] = {}

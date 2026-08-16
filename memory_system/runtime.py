@@ -189,18 +189,18 @@ def _scan_package_fields(
         while index < len(source) and source[index] != "}":
             key_start = index
             index = _skip_string(source, index)
-            key = source[key_start:index]
+            key = json.loads(source[key_start:index])
             index = _skip_whitespace(source, index)
             if index >= len(source) or source[index] != ":":
                 return None
             index = _skip_whitespace(source, index + 1)
-            if key in ('"name"', '"version"') and index < len(source) and source[index] == '"':
+            if key in ("name", "version") and index < len(source) and source[index] == '"':
                 value_start = index
                 index = _skip_string(source, index)
                 value = decode_string(source[value_start:index])
                 if not isinstance(value, str):
                     return None
-                if key == '"name"':
+                if key == "name":
                     name = value
                 else:
                     version = value
