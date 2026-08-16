@@ -4,6 +4,7 @@ import importlib.resources
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -52,12 +53,41 @@ def test_readme_memory_system_commands_parse_through_main(tmp_path: Path, capsys
         capsys.readouterr()
 
 
+def test_documented_quick_start_commands_succeed_in_order(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    shutil.copytree(EXAMPLE, workspace)
+
+    for command in (
+        ("doctor",),
+        ("plan",),
+        ("apply", "--yes"),
+        ("verify",),
+        ("apply", "--yes"),
+    ):
+        assert main((*command, "--workspace", str(workspace))) == 0
+        capsys.readouterr()
+
+
 def test_local_document_links_exist() -> None:
     text = README.read_text(encoding="utf-8")
 
     for target in ("docs/installation.md", "docs/architecture.md", "docs/upgrades.md", "docs/recovery.md"):
         assert f"]({target})" in text
         assert (REPOSITORY / target).is_file()
+
+
+def test_onboarding_and_upgrade_docs_are_reproducible() -> None:
+    readme = README.read_text(encoding="utf-8")
+    installation = (REPOSITORY / "docs/installation.md").read_text(encoding="utf-8")
+    upgrades = (REPOSITORY / "docs/upgrades.md").read_text(encoding="utf-8")
+
+    for text in (readme, installation, upgrades):
+        assert "https://github.com/nitrogen5052/memory_system_1.git" in text
+    assert "python3 -m venv .venv" in installation
+    assert ".venv/bin/python -m pip install ." in installation
+    assert "python3 -m venv .venv" in upgrades
+    assert ".venv/bin/python -m pip install ." in upgrades
+    assert "https://github.com/thedotmack/claude-mem#quick-start" in installation
 
 
 def test_example_has_two_isolated_child_projects() -> None:

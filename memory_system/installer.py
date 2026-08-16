@@ -66,7 +66,7 @@ def apply_plan(plan: Plan, confirmed: bool) -> InstallResult:
     backup_dir = _create_backup_dir(workspace)
     originals: dict[PurePosixPath, bytes | None] = {}
     modes: dict[PurePosixPath, int | None] = {}
-    rewritten = tuple(change for change in changes if change.kind is not ChangeKind.ADOPT_EXISTING)
+    rewritten = tuple(change for change in changes if change.content is not None)
     for change in rewritten:
         _backup_target(workspace, backup_dir, change.path, originals, modes)
     _backup_target(workspace, backup_dir, _METADATA_PATH, originals, modes)
@@ -83,7 +83,7 @@ def apply_plan(plan: Plan, confirmed: bool) -> InstallResult:
             _check_after_hash(target, change)
             changed_paths.append(change.path)
 
-        payload = _installation_payload(workspace, changes, backup_dir, prior_metadata_existed)
+        payload = _installation_payload(workspace, plan, changes, backup_dir, prior_metadata_existed)
         metadata_bytes = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         touched.append(_METADATA_PATH)
         _atomic_write(metadata, metadata_bytes, modes[_METADATA_PATH])
@@ -150,6 +150,9 @@ def _validate_changes(workspace: Path, changes: tuple[PlannedChange, ...]) -> No
         if change.kind is ChangeKind.ADOPT_EXISTING:
             if change.content is not None or change.before_sha256 is None:
                 raise ApplyError(f"invalid adoption change: {path}")
+        elif change.kind is ChangeKind.RETIRE_CURATED_STATE:
+            if change.content is not None or change.before_sha256 is None:
+                raise ApplyError(f"invalid curated-state retirement: {path}")
         elif change.content is None or change.after_sha256 is None:
             raise ApplyError(f"missing replacement content: {path}")
         _contained_path(workspace, path, "planned target")
@@ -217,29 +220,30 @@ def _restore(
 
 def _installation_payload(
     workspace: Path,
+    plan: Plan,
     changes: tuple[PlannedChange, ...],
     backup_dir: PurePosixPath,
     prior_metadata_existed: bool,
 ) -> dict[str, object]:
     try:
-        config = load_workspace_config(workspace)
+        config = load_workspace_config(workspace, plan.config_path)
         schema_version, methodology_version = config.schema_version, config.methodology_version
     except Exception as exc:  # The plan may be constructed by an API caller without config files.
         if any(change.path.parts[:3] == ("_memory", "Context", "projects") for change in changes):
             raise ApplyError("could not load workspace configuration") from exc
         schema_version, methodology_version = 1, "unknown"
-    artifacts: dict[str, dict[str, str | None]] = {}
+    artifacts = _prior_artifacts(workspace)
+    retired: list[dict[str, object]] = []
     for change in changes:
-        record: dict[str, str | None] = {
-            "original_sha256": change.before_sha256,
-            "applied_sha256": change.after_sha256 or change.before_sha256,
-            "change_kind": change.kind.value,
-            "ownership": _ownership(change.path),
-        }
-        block_id = _block_id(change.content)
-        if block_id is not None:
-            record["block_id"] = block_id
-        artifacts[change.path.as_posix()] = record
+        if change.kind is ChangeKind.RETIRE_CURATED_STATE:
+            artifacts.pop(change.path.as_posix(), None)
+            continue
+        record = _artifact_record(workspace, change)
+        if change.kind is ChangeKind.RETIRE_MANAGED_BLOCK:
+            artifacts.pop(change.path.as_posix(), None)
+            retired.append({"path": change.path.as_posix(), "record": record})
+        else:
+            artifacts[change.path.as_posix()] = record
     return {
         "applied_at_utc": datetime.now(UTC).isoformat(),
         "artifacts": artifacts,
@@ -247,7 +251,49 @@ def _installation_payload(
         "methodology_version": methodology_version,
         "prior_metadata_existed": prior_metadata_existed,
         "schema_version": schema_version,
+        "metadata_schema_version": 2,
+        "rollback_artifacts": retired,
     }
+
+
+def _prior_artifacts(workspace: Path) -> dict[str, dict[str, object]]:
+    metadata = workspace / ".memory-system/installation.json"
+    if not metadata.exists():
+        return {}
+    try:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ApplyError("invalid existing installation metadata") from exc
+    artifacts = payload.get("artifacts") if isinstance(payload, dict) else None
+    if not isinstance(artifacts, dict):
+        raise ApplyError("invalid existing installation metadata")
+    return {
+        path: dict(record)
+        for path, record in artifacts.items()
+        if isinstance(path, str)
+        and isinstance(record, dict)
+        and record.get("ownership") in {"managed", "curated"}
+        and isinstance(record.get("applied_sha256"), str)
+    }
+
+
+def _artifact_record(workspace: Path, change: PlannedChange) -> dict[str, object]:
+    target = _contained_path(workspace, change.path, "installed target")
+    actual_bytes = target.read_bytes() if target.exists() else None
+    actual = actual_bytes.decode("utf-8") if actual_bytes is not None else None
+    record: dict[str, object] = {
+        "original_sha256": change.before_sha256,
+        "applied_sha256": _sha256_bytes(actual_bytes) if actual_bytes is not None else None,
+        "change_kind": change.kind.value,
+        "ownership": _ownership(change.path),
+    }
+    block_id = _block_id(actual)
+    if block_id is not None:
+        from .templates import managed_block_digest
+
+        record["block_id"] = block_id
+        record["managed_block_sha256"] = managed_block_digest(actual, block_id)
+    return record
 
 
 def _ownership(path: PurePosixPath) -> str:
@@ -338,7 +384,15 @@ def _preflight_rollback(
     operations: list[_RollbackOperation] = []
     changed: list[PurePosixPath] = []
     adopted: list[PurePosixPath] = []
-    for raw_path, record in sorted(artifacts.items()):
+    rollback_records: dict[object, object] = dict(artifacts)
+    raw_retired = payload.get("rollback_artifacts", [])
+    if not isinstance(raw_retired, list):
+        raise ApplyError("invalid rollback artifact metadata")
+    for entry in raw_retired:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(entry.get("record"), dict):
+            raise ApplyError("invalid rollback artifact metadata")
+        rollback_records[entry["path"]] = entry["record"]
+    for raw_path, record in sorted(rollback_records.items()):
         path = _safe_relative(raw_path, "artifact")
         if not isinstance(record, dict):
             raise ApplyError("invalid installation artifact")

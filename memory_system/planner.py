@@ -17,6 +17,9 @@ from .templates import (
     render_registry,
     render_root_protocol,
     render_root_state,
+    managed_block_digest,
+    managed_block_ids,
+    remove_managed_block,
     upsert_managed_block,
 )
 
@@ -26,6 +29,8 @@ class ChangeKind(StrEnum):
     ADOPT_EXISTING = "adopt-existing"
     UPDATE_MANAGED_BLOCK = "update-managed-block"
     UPDATE_GENERATED = "update-generated"
+    RETIRE_MANAGED_BLOCK = "retire-managed-block"
+    RETIRE_CURATED_STATE = "retire-curated-state"
     CONFLICT = "conflict"
 
 
@@ -44,12 +49,14 @@ class Plan:
     workspace: Path
     changes: tuple[PlannedChange, ...]
     conflicts: tuple[PlannedChange, ...]
+    config_path: Path | None = None
 
 
 def build_plan(workspace: Path, config_path: Path | None = None) -> Plan:
     """Return the changes needed to install memory artifacts without writing them."""
     workspace = workspace.resolve(strict=True)
-    config = load_workspace_config(workspace, config_path)
+    resolved_config = (config_path or workspace / "memory-system.toml").resolve()
+    config = load_workspace_config(workspace, resolved_config)
     records = _load_records(workspace)
     changes: list[PlannedChange] = []
     conflicts: list[PlannedChange] = []
@@ -69,11 +76,13 @@ def build_plan(workspace: Path, config_path: Path | None = None) -> Plan:
             conflicts.append(_conflict(path, None, "path uses a symlink alias"))
         else:
             _plan_authority(workspace, path, block_id, body, records.get(path), changes, conflicts)
+    _plan_retirements(workspace, records, config, changes, conflicts)
 
     return Plan(
         workspace=workspace,
         changes=tuple(sorted(changes, key=_path_key)),
         conflicts=tuple(sorted(conflicts, key=_path_key)),
+        config_path=resolved_config,
     )
 
 
@@ -160,8 +169,16 @@ def _plan_state(
         changes.append(_change(path, ChangeKind.CREATE, None, content, "curated state is absent"))
     elif not _owned(record, "curated"):
         conflicts.append(_conflict(path, before, "unrecorded pre-existing state file"))
+    elif not _state_has_freshness_fields(before):
+        conflicts.append(
+            _conflict(path, before, "curated state requires a manual freshness-schema update")
+        )
     # Curated state prose belongs to the project.  Its structural schema is
     # verified separately, so a content edit must not produce a managed drift.
+
+
+def _state_has_freshness_fields(content: str) -> bool:
+    return all(field in content for field in ("canonical root:", "last_verified:", "last_reconciled:"))
 
 
 def _plan_authority(
@@ -178,21 +195,70 @@ def _plan_authority(
         conflicts.append(_conflict(path, None, "configured authority file is absent"))
         return
     try:
-        after = upsert_managed_block(before, block_id, body)
+        owners = managed_block_ids(before)
+        recorded_id = record.get("block_id") if record else None
+        if recorded_id is not None and recorded_id != block_id:
+            if not isinstance(recorded_id, str) or tuple(owners) != (recorded_id,):
+                raise ManagedBlockConflict("managed block owner does not match installation record")
+            if not _matches_managed_block(record, before, recorded_id):
+                raise ManagedBlockConflict("managed authority differs from applied block hash")
+            after = upsert_managed_block(remove_managed_block(before, recorded_id), block_id, body)
+        else:
+            if owners and tuple(owners) != (block_id,):
+                raise ManagedBlockConflict("managed block has the wrong owner")
+            after = upsert_managed_block(before, block_id, body)
     except ManagedBlockConflict as exc:
         conflicts.append(_conflict(path, before, str(exc)))
         return
-    if after == before and _owned(record, "managed") and _matches_applied(record, before):
+    if after == before and _owned(record, "managed") and _matches_managed_block(record, before, block_id):
         return
     elif after == before:
         if _owned(record, "managed"):
-            conflicts.append(_conflict(path, before, "managed authority differs from applied hash"))
+            conflicts.append(_conflict(path, before, "managed authority differs from applied block hash"))
         else:
             changes.append(_change(path, ChangeKind.ADOPT_EXISTING, before, None, "exact managed block"))
     else:
         changes.append(
             _change(path, ChangeKind.UPDATE_MANAGED_BLOCK, before, after, "managed block differs")
         )
+
+
+def _plan_retirements(
+    workspace: Path,
+    records: dict[PurePosixPath, dict[str, str]],
+    config: WorkspaceConfig,
+    changes: list[PlannedChange],
+    conflicts: list[PlannedChange],
+) -> None:
+    desired_authority = {path: block_id for path, block_id, _body in _authority_artifacts(config)}
+    desired_states = {config.root_state, *(project.state for project in config.projects)}
+    planned_paths = {change.path for change in changes}
+    for path, record in records.items():
+        if path in planned_paths:
+            continue
+        ownership = record.get("ownership")
+        if ownership == "curated" and path not in desired_states:
+            before = _read(workspace, path)
+            if before is None:
+                conflicts.append(_conflict(path, None, "retired curated state is unavailable"))
+            else:
+                changes.append(
+                    PlannedChange(path, ChangeKind.RETIRE_CURATED_STATE, _sha256(before), None, None, "retain curated state and retire its installation record")
+                )
+        elif ownership == "managed" and isinstance(record.get("block_id"), str) and path not in desired_authority:
+            before = _read(workspace, path)
+            if before is None:
+                conflicts.append(_conflict(path, None, "retired managed authority is unavailable"))
+                continue
+            block_id = record["block_id"]
+            try:
+                if not _matches_managed_block(record, before, block_id):
+                    raise ManagedBlockConflict("managed authority differs from applied block hash")
+                after = remove_managed_block(before, block_id)
+            except ManagedBlockConflict as exc:
+                conflicts.append(_conflict(path, before, str(exc)))
+            else:
+                changes.append(_change(path, ChangeKind.RETIRE_MANAGED_BLOCK, before, after, "configured authority ownership was retired"))
 
 
 def _load_records(workspace: Path) -> dict[PurePosixPath, dict[str, str]]:
@@ -238,6 +304,20 @@ def _owned(record: dict[str, str] | None, ownership: str) -> bool:
 
 def _matches_applied(record: dict[str, str] | None, content: str) -> bool:
     return record is not None and record.get("applied_sha256") == _sha256(content)
+
+
+def _matches_managed_block(record: dict[str, str] | None, content: str, block_id: str) -> bool:
+    if record is None:
+        return False
+    digest = record.get("managed_block_sha256")
+    if digest is not None:
+        try:
+            return digest == managed_block_digest(content, block_id)
+        except ManagedBlockConflict:
+            return False
+    # Schema-1 stored only a whole-file hash. Retaining that stricter check is
+    # safe for migration; schema-2 records decouple unowned bytes thereafter.
+    return _matches_applied(record, content)
 
 
 def _change(

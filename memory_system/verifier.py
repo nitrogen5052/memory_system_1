@@ -11,7 +11,7 @@ import re
 from .config import ConfigError, WorkspaceConfig, load_compatibility, load_workspace_config
 from .planner import build_plan
 from .runtime import run_doctor
-from .templates import render_registry
+from .templates import ManagedBlockConflict, managed_block_digest, managed_block_ids, render_registry
 
 
 _STATE_HEADINGS = (
@@ -111,6 +111,9 @@ def _state_schema_check(workspace: Path, config: WorkspaceConfig) -> Verificatio
             return VerificationCheck("state-schema", False, f"state is unavailable: {state}: {exc}")
         if headings != _STATE_HEADINGS:
             return VerificationCheck("state-schema", False, f"state headings are invalid: {state}")
+        content = _target(workspace, state).read_text(encoding="utf-8")
+        if "canonical root:" not in content or "last_verified:" not in content or "last_reconciled:" not in content:
+            return VerificationCheck("state-schema", False, f"state freshness fields are invalid: {state}")
     return VerificationCheck("state-schema", True, "all curated state documents have the required headings")
 
 
@@ -122,14 +125,16 @@ def _marker_check(workspace: Path, config: WorkspaceConfig) -> VerificationCheck
             content = _target(workspace, path).read_text(encoding="utf-8")
         except OSError as exc:
             return VerificationCheck("managed-markers", False, f"authority is unavailable: {path}: {exc}")
+        try:
+            owners = managed_block_ids(content)
+        except ManagedBlockConflict as exc:
+            return VerificationCheck("managed-markers", False, f"invalid marker syntax: {path}: {exc}")
+        if tuple(owners) != (expected_id,):
+            return VerificationCheck("managed-markers", False, f"expected one balanced {expected_id} block: {path}")
         comments = tuple(_MARKER_LIKE.finditer(content))
         markers = tuple(_MARKER.finditer(content))
         if len(comments) != len(markers) or any(comment.group() != marker.group() for comment, marker in zip(comments, markers, strict=True)):
             return VerificationCheck("managed-markers", False, f"invalid marker syntax: {path}")
-        starts = [marker for marker in markers if marker.group(1) == expected_id and marker.group(2) == "start"]
-        ends = [marker for marker in markers if marker.group(1) == expected_id and marker.group(2) == "end"]
-        if len(starts) != 1 or len(ends) != 1 or starts[0].start() > ends[0].start() or any(marker.group(1) != expected_id for marker in markers):
-            return VerificationCheck("managed-markers", False, f"expected one balanced {expected_id} block: {path}")
     return VerificationCheck("managed-markers", True, "all authority targets have one balanced managed block")
 
 
@@ -188,9 +193,20 @@ def _managed_hash_check(
             return VerificationCheck("managed-hashes", False, f"managed artifact is unavailable: {path}: {exc}")
         if resolved != target or not target.is_file():
             return VerificationCheck("managed-hashes", False, f"managed artifact is not a contained regular file: {path}")
-        actual = hashlib.sha256(target.read_bytes()).hexdigest()
-        if record.get("applied_sha256") != actual:
-            return VerificationCheck("managed-hashes", False, f"managed artifact hash drift: {path}")
+        if isinstance(record.get("block_id"), str):
+            try:
+                actual_block = managed_block_digest(target.read_text(encoding="utf-8"), record["block_id"])
+            except (OSError, ManagedBlockConflict) as exc:
+                return VerificationCheck("managed-hashes", False, f"managed block is invalid: {path}: {exc}")
+            expected_block = record.get("managed_block_sha256")
+            if expected_block is not None and expected_block != actual_block:
+                return VerificationCheck("managed-hashes", False, f"managed block hash drift: {path}")
+            if expected_block is None and record.get("applied_sha256") != hashlib.sha256(target.read_bytes()).hexdigest():
+                return VerificationCheck("managed-hashes", False, f"managed artifact hash drift: {path}")
+        else:
+            actual = hashlib.sha256(target.read_bytes()).hexdigest()
+            if record.get("applied_sha256") != actual:
+                return VerificationCheck("managed-hashes", False, f"managed artifact hash drift: {path}")
     for state in (config.root_state, *(project.state for project in config.projects)):
         record = artifacts.get(state.as_posix())
         if not isinstance(record, dict) or record.get("ownership") != "curated":

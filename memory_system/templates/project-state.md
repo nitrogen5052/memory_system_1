@@ -4,6 +4,8 @@
 
 $identity
 
+canonical root: `$canonical_root`
+
 ## Authority
 
 $authority
@@ -28,4 +30,6 @@ $authority
 
 ## Freshness
 
-$state
+last_verified: null
+
+last_reconciled: null

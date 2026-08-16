@@ -41,12 +41,12 @@ def render_active_index(config: WorkspaceConfig) -> str:
 
 def render_root_state(config: WorkspaceConfig) -> str:
     """Render the root workspace state document."""
-    return _render_state(config.root_identity, config.root_state, config.root_authority)
+    return _render_state(config.root_identity, ".", config.root_authority)
 
 
 def render_project_state(project: ProjectSpec) -> str:
     """Render a child project's state document."""
-    return _render_state(project.identity, project.state, project.authority)
+    return _render_state(project.identity, project.path, project.authority)
 
 
 def render_root_protocol(config: WorkspaceConfig) -> str:
@@ -80,6 +80,35 @@ def upsert_managed_block(existing: str, block_id: str, body: str) -> str:
     return f"{existing}{separator}{_start_marker(block_id)}\n{body}{_end_marker(block_id)}\n"
 
 
+def remove_managed_block(existing: str, block_id: str) -> str:
+    """Remove exactly one owned block while preserving all other bytes."""
+    pairs = _validated_marker_pairs(existing)
+    _reject_unmanaged_memory_content(_unmanaged_text(existing, pairs))
+    pair = pairs.get(block_id)
+    if pair is None:
+        raise ManagedBlockConflict(f"managed block owner is not {block_id}")
+    start, end = pair
+    return existing[: start.start()] + existing[end.end() :]
+
+
+def managed_block_digest(existing: str, block_id: str) -> str:
+    """Return a digest of one exact managed block, excluding unowned bytes."""
+    import hashlib
+
+    pairs = _validated_marker_pairs(existing)
+    pair = pairs.get(block_id)
+    if pair is None:
+        raise ManagedBlockConflict(f"managed block owner is not {block_id}")
+    start, end = pair
+    return hashlib.sha256(existing[start.start() : end.end()].encode("utf-8")).hexdigest()
+
+
+def managed_block_ids(existing: str) -> tuple[str, ...]:
+    """Return validated managed owners in source order."""
+    pairs = _validated_marker_pairs(existing)
+    return tuple(block_id for block_id, _pair in pairs.items())
+
+
 def _render(name: str, **values: str) -> str:
     source = resources.files("memory_system").joinpath("templates", name).read_text(
         encoding="utf-8"
@@ -88,12 +117,12 @@ def _render(name: str, **values: str) -> str:
 
 
 def _render_state(
-    identity: str, state: PurePosixPath, authority: tuple[PurePosixPath, ...]
+    identity: str, canonical_root: PurePosixPath | str, authority: tuple[PurePosixPath, ...]
 ) -> str:
     return _render(
         "project-state.md",
         identity=identity,
-        state=_path(state),
+        canonical_root=_path(canonical_root),
         authority="<br>".join(_path(item) for item in authority),
     )
 
@@ -128,16 +157,23 @@ def _validated_marker_pairs(existing: str) -> dict[str, tuple[re.Match[str], re.
     ):
         raise ManagedBlockConflict("invalid managed-block marker")
 
-    markers: dict[str, dict[str, list[re.Match[str]]]] = {}
+    pairs: dict[str, tuple[re.Match[str], re.Match[str]]] = {}
+    open_marker: re.Match[str] | None = None
     for marker in parsed_markers:
-        markers.setdefault(marker.group(1), {"start": [], "end": []})[marker.group(2)].append(marker)
-
-    pairs = {}
-    for block_id, sides in markers.items():
-        starts, ends = sides["start"], sides["end"]
-        if len(starts) != 1 or len(ends) != 1 or starts[0].start() > ends[0].start():
-            raise ManagedBlockConflict("invalid managed-block marker")
-        pairs[block_id] = (starts[0], ends[0])
+        block_id, side = marker.group(1), marker.group(2)
+        if side == "start":
+            # Blocks are intentionally flat: nesting and overlap make ownership
+            # ambiguous and could cause an update to replace someone else's bytes.
+            if open_marker is not None or block_id in pairs:
+                raise ManagedBlockConflict("overlapping or duplicate managed-block marker")
+            open_marker = marker
+        else:
+            if open_marker is None or open_marker.group(1) != block_id:
+                raise ManagedBlockConflict("invalid managed-block marker")
+            pairs[block_id] = (open_marker, marker)
+            open_marker = None
+    if open_marker is not None:
+        raise ManagedBlockConflict("invalid managed-block marker")
     return pairs
 
 

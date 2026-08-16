@@ -9,7 +9,7 @@ The workflow is supported on macOS, Linux, and WSL. Native Windows is deferred; 
 Clone the release tag you intend to use, then enter the checkout:
 
 ```sh
-git clone --branch v1.0.0 --depth 1 <repository-url> portable-project-memory
+git clone --branch v1.0.0 --depth 1 https://github.com/nitrogen5052/memory_system_1.git portable-project-memory
 cd portable-project-memory
 ```
 
