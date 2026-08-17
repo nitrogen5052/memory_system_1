@@ -30,6 +30,36 @@ BLOCKED_PATTERNS = (
     "/" + "Users/",
     "/" + "home/",
 )
+_SOURCE_SCAN_EXCLUDED_PARTS = {
+    ".git",
+    ".memory-system",
+    ".pytest_cache",
+    ".superpowers",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+}
+_SOURCE_TEXT_SUFFIXES = {"", ".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}
+
+
+def _repository_text_files() -> tuple[Path, ...]:
+    if (REPOSITORY / ".git").is_dir() and shutil.which("git") is not None:
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=REPOSITORY, check=True, capture_output=True
+        ).stdout.split(b"\0")
+        return tuple(REPOSITORY / os.fsdecode(relative) for relative in filter(None, tracked))
+
+    return tuple(
+        path
+        for path in sorted(REPOSITORY.rglob("*"))
+        if path.is_file()
+        and path.suffix in _SOURCE_TEXT_SUFFIXES
+        and not any(
+            part in _SOURCE_SCAN_EXCLUDED_PARTS or part.endswith(".egg-info")
+            for part in path.relative_to(REPOSITORY).parts
+        )
+    )
 
 
 def _readme_memory_system_commands() -> list[tuple[str, ...]]:
@@ -120,13 +150,19 @@ def test_example_has_two_isolated_child_projects() -> None:
 
 
 def test_tracked_examples_and_repository_files_contain_no_portability_secrets() -> None:
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=REPOSITORY, check=True, capture_output=True
-    ).stdout.split(b"\0")
-
-    for relative in filter(None, tracked):
-        content = (REPOSITORY / os.fsdecode(relative)).read_text(encoding="utf-8")
+    for path in _repository_text_files():
+        content = path.read_text(encoding="utf-8")
         assert not any(pattern in content for pattern in BLOCKED_PATTERNS)
+
+
+def test_portability_scan_supports_source_snapshots_without_git(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+
+    files = _repository_text_files()
+
+    assert README in files
+    assert REPOSITORY / "memory_system/config.py" in files
+    assert not any("__pycache__" in path.parts for path in files)
 
 
 def test_templates_are_packaged_in_an_installed_wheel(tmp_path: Path) -> None:
